@@ -71,7 +71,7 @@ print("Using device:", device)
 # 모델 및 데이터셋 인스턴스 생성
 D = Discriminator().to(device)
 G = Generator().to(device)
-dataset = CelebADataset('/content/drive/MyDrive/Colab Notebooks/img_align_celeba.h5py')
+dataset = CelebADataset('your_path/img_align_celeba.h5py')
 dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
 # 훈련 루프
