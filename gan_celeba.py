@@ -1,119 +1,152 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-import numpy as np
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
-import h5py
-import pandas as pd
+import os
 
-# CelebA 데이터셋을 위한 사용자 정의 데이터셋 클래스 정의
-class CelebADataset(Dataset):
-    def __init__(self, file):
-        # 데이터셋 파일 오픈
-        self.file_object = h5py.File(file, 'r')
-        self.dataset = self.file_object['img_align_celeba']
+# -----------------------------
+# Config
+# -----------------------------
+latent_dim = 100
+batch_size = 128
+epochs = 50
+image_size = 64
+save_path = './generated_samples'
+os.makedirs(save_path, exist_ok=True)
 
-    def __len__(self):
-        # 데이터셋의 전체 길이 반환
-        return len(self.dataset)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def __getitem__(self, index):
-        # 데이터셋에서 하나의 이미지를 인덱스를 통해 가져옴
-        if index >= len(self.dataset):
-            raise IndexError("Index out of bound")
-        img = np.array(self.dataset[str(index) + '.jpg'])
-        return torch.tensor(img, dtype=torch.float32) / 255.0  # 이미지를 텐서로 변환하고 정규화
-
-# 판별자(Discriminator) 모델 아키텍처 정의
-class Discriminator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Flatten(),  # 이미지를 1차원으로 변환
-            nn.Linear(3*218*178, 100),  # 첫 번째 선형 계층
-            nn.LeakyReLU(0.2),  # LeakyReLU 활성화 함수
-            nn.LayerNorm(100),  # LayerNorm을 통한 정규화
-            nn.Linear(100, 1),  # 출력 계층
-            nn.Sigmoid()  # Sigmoid 활성화 함수로 확률 출력
-        )
-        self.loss_function = nn.BCELoss()  # 이진 교차 엔트로피 손실 함수
-        self.optimiser = torch.optim.Adam(self.parameters(), lr=0.0001)  # Adam 옵티마이저
-
-    def forward(self, inputs):
-        return self.model(inputs)  # 입력 데이터를 모델에 통과시켜 결과를 반환
-
-# 생성자(Generator) 모델 아키텍처 정의
+# -----------------------------
+# Generator
+# -----------------------------
 class Generator(nn.Module):
     def __init__(self):
-        super().__init__()
+        super(Generator, self).__init__()
         self.model = nn.Sequential(
-            nn.Linear(100, 3 * 10 * 10),  # 입력 노이즈를 받는 선형 계층
-            nn.LeakyReLU(0.2),  # LeakyReLU 활성화 함수
-            nn.LayerNorm(3 * 10 * 10),  # LayerNorm
-            nn.Linear(3 * 10 * 10, 3 * 218 * 178),  # 이미지를 복원하는 선형 계층
-            nn.Sigmoid()  # 이미지 픽셀 값을 [0,1] 범위로 압축
+            nn.ConvTranspose2d(latent_dim, 512, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(512, 256, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(256, 128, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(128, 64, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+
+            nn.ConvTranspose2d(64, 3, 4, 2, 1, bias=False),
+            nn.Tanh()
         )
-        self.optimiser = torch.optim.Adam(self.parameters(), lr=0.01)  # Adam 옵티마이저
 
-    def forward(self, inputs):
-        output = self.model(inputs)
-        return output.view(-1, 3, 218, 178)  # 출력을 이미지 형태로 재구성
+    def forward(self, x):
+        return self.model(x)
 
-# 유틸리티 함수
-def generate_random_seed(size):
-    # 주어진 크기의 랜덤 텐서 생성
-    return torch.rand(size)
+# -----------------------------
+# Discriminator
+# -----------------------------
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(3, 64, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
 
-# 훈련 환경 설정
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+            nn.Conv2d(64, 128, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
 
-# 모델 및 데이터셋 인스턴스 생성
-D = Discriminator().to(device)
+            nn.Conv2d(128, 256, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(256, 512, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(512, 1, 4, 1, 0, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.model(x).view(-1, 1)
+
+# -----------------------------
+# DataLoader
+# -----------------------------
+transform = transforms.Compose([
+    transforms.Resize(image_size),
+    transforms.CenterCrop(image_size),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5]*3, [0.5]*3)
+])
+
+dataset = datasets.ImageFolder(root='your_path/celeba', transform=transform)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+# -----------------------------
+# Initialize models
+# -----------------------------
 G = Generator().to(device)
-dataset = CelebADataset('your_path/img_align_celeba.h5py')
-dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+D = Discriminator().to(device)
 
-# 훈련 루프
-epochs = 10
+criterion = nn.BCELoss()
+optimizer_G = torch.optim.Adam(G.parameters(), lr=0.0002, betas=(0.5, 0.999))
+optimizer_D = torch.optim.Adam(D.parameters(), lr=0.0002, betas=(0.5, 0.999))
+
+# -----------------------------
+# Training
+# -----------------------------
+fixed_noise = torch.randn(64, latent_dim, 1, 1, device=device)
+
 for epoch in range(epochs):
-    for i, real_images in enumerate(dataloader):
+    for i, (real_images, _) in enumerate(dataloader):
         real_images = real_images.to(device)
-        real_targets = torch.ones(real_images.size(0), 1).to(device)
-        fake_targets = torch.zeros(real_images.size(0), 1).to(device)
+        batch_size = real_images.size(0)
 
-        # 진짜 이미지로 판별자 훈련
-        D.optimiser.zero_grad()
-        real_loss = D.loss_function(D(real_images), real_targets)
-        real_loss.backward()
+        real_labels = torch.ones(batch_size, 1, device=device)
+        fake_labels = torch.zeros(batch_size, 1, device=device)
 
-        # 가짜 이미지로 판별자 훈련
-        noise = generate_random_seed((real_images.size(0), 100)).to(device)
+        # Train Discriminator
+        noise = torch.randn(batch_size, latent_dim, 1, 1, device=device)
         fake_images = G(noise)
-        fake_loss = D.loss_function(D(fake_images.detach()), fake_targets)
-        fake_loss.backward()
-        D.optimiser.step()
 
-        # 생성자 훈련
-        G.optimiser.zero_grad()
-        generator_loss = D.loss_function(D(fake_images), real_targets)
-        generator_loss.backward()
-        G.optimiser.step()
+        outputs_real = D(real_images)
+        outputs_fake = D(fake_images.detach())
+
+        d_loss_real = criterion(outputs_real, real_labels)
+        d_loss_fake = criterion(outputs_fake, fake_labels)
+        d_loss = d_loss_real + d_loss_fake
+
+        optimizer_D.zero_grad()
+        d_loss.backward()
+        optimizer_D.step()
+
+        # Train Generator
+        outputs = D(fake_images)
+        g_loss = criterion(outputs, real_labels)
+
+        optimizer_G.zero_grad()
+        g_loss.backward()
+        optimizer_G.step()
 
         if i % 100 == 0:
-            print(f'Epoch: {epoch}, Batch: {i}, D_Loss: {real_loss + fake_loss}, G_Loss: {generator_loss}')
+            print(f"Epoch [{epoch+1}/{epochs}] Batch [{i}/{len(dataloader)}] D_loss: {d_loss.item():.4f} G_loss: {g_loss.item():.4f}")
 
-# 생성된 이미지 시각화
-sample_size = 6
-fig, axes = plt.subplots(1, sample_size, figsize=(10, 2))
-for k in range(sample_size):
-    noise = generate_random_seed(100).to(device)
-    fake_image = G(noise).detach().cpu().numpy()
+    # 샘플 이미지 저장
+    with torch.no_grad():
+        generated = G(fixed_noise).detach().cpu()
+        grid = torch.cat([generated[i] for i in range(16)], dim=2)
+        grid = torch.cat(torch.chunk(grid, 4), dim=1)
+        grid = grid.permute(1, 2, 0).numpy()
+        grid = (grid * 0.5 + 0.5).clip(0, 1)
 
-    if fake_image.ndim == 4 and fake_image.shape[0] == 1:
-        fake_image = fake_image.squeeze(0)  # 첫 번째 배치 차원 제거
-
-    fake_image = np.transpose(fake_image, (1, 2, 0))  # 채널을 마지막으로 이동
-    axes[k].imshow(np.clip(fake_image, 0, 1))
-    axes[k].axis('off')
-plt.show()
+        plt.imshow(grid)
+        plt.axis('off')
+        plt.savefig(f'{save_path}/epoch_{epoch+1}.png')
+        plt.close()
